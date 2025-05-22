@@ -1,8 +1,8 @@
 <script setup>
 
 
-import { ref, onMounted, watch } from 'vue'
-import { SunIcon, MoonIcon, UserCircleIcon, ChartBarIcon, BookOpenIcon } from '@heroicons/vue/24/outline'
+import { ref, onMounted, watch, computed } from 'vue'
+import { SunIcon, MoonIcon, UserCircleIcon, ChartBarIcon, BookOpenIcon, SpeakerWaveIcon } from '@heroicons/vue/24/outline'
 import { Moon, Sunny, UserFilled, Reading, Setting, Notebook, DataAnalysis, Menu } from '@element-plus/icons-vue'
 import { vocabBooksApi } from './api/vocabBooks'
 import axios from 'axios'
@@ -25,6 +25,7 @@ const stats = ref({ total: 0, known: 0, learning: 0, new: 0, blocked: 0 })
 const showAboutDialog = ref(false)
 const apiBaseUrl = ref('https://api.siliconflow.cn/v1/chat/completions')
 const apiKey = ref('sk-gtmfuyqylvhrvqtlumegcsgvovyowrjqjjwnnjcitphgyxyi')
+const aiLoading = ref(false)
 
 // 设置本地存储key
 const SETTINGS_KEY = 'deepmemo_settings'
@@ -149,8 +150,8 @@ const loadWords = async () => {
     learnStatus.value = 'allBlocked'
     return
   }
-  // 只保留未学满5次的单词
-  const availableWords = allWords.filter(w => (w.review_count || 0) < 5)
+  // 只保留未记住的单词
+  const availableWords = allWords.filter(w => !w.isMastered)
   if (availableWords.length === 0) {
     currentWord.value = null
     learnStatus.value = 'done'
@@ -167,9 +168,10 @@ const recommendNextWord = async (words, learningHistory) => {
     currentWord.value = null
     return
   }
+  aiLoading.value = true
   // 只取最近n条历史反馈
   const historyStr = (learningHistory || []).slice(0, memoryContextLength.value).map(h => `${h.word} ^${h.feedback}`).join(', ')
-  const systemPrompt = `你是一个智能单词学习推荐助手。历史反馈是用户最近背过的单词及其记忆情况，格式如 word ^A、word ^B、word ^C，^A表示用户认识，^B表示不认识，^C表示永不推送。请你结合记忆曲线，优先推荐最合适且不重复的单词进行学习。你只能从用户给定的单词列表中选择一个最适合学习的单词，严格区分大小写，只返回该单词本身，不要返回列表或解释或任何其他内容。当用户上一个选择认识后，优先推荐下一个单词，当用户上一个选择不认识后，优先推荐下一个没背过的单词。`
+  const systemPrompt = `你是一个智能单词学习推荐助手。历史反馈是用户最近背过的单词及其记忆情况，格式如 word ^A、word ^B、word ^C，^A表示用户认识，^B表示不认识，^C表示永不推送。请你结合记忆曲线，优先推荐最合适且不重复的单词进行学习。你只能从用户给定的单词列表中选择一个最适合学习的单词，严格区分大小写，只返回该单词本身，不要返回列表或解释或任何其他内容。当用户上一个选择认识后，优先推荐下一个单词，当用户上一个选择不认识后，优先推荐下一个没背过的单词。单词一定要完全匹配给出的单词列表中的单词。`
   const userPrompt = `单词及复习次数：${words.map(w => w.word + ':' + (w.review_count || 0)).join(', ')}。历史反馈：${historyStr}`
   console.log('[AI推词systemPrompt]', systemPrompt)
   console.log('[AI推词userPrompt]', userPrompt)
@@ -203,6 +205,7 @@ const recommendNextWord = async (words, learningHistory) => {
     currentWord.value = next ? { ...next } : { ...words[0] }
     showMeaning.value = false
     learnStatus.value = 'learning'
+    aiLoading.value = false
   } catch (e) {
     ElMessage.error(e?.message || 'AI接口请求失败')
     // AI异常时默认顺序推荐
@@ -213,6 +216,7 @@ const recommendNextWord = async (words, learningHistory) => {
     } else {
       learnStatus.value = 'learning'
     }
+    aiLoading.value = false
   }
 }
 
@@ -230,7 +234,7 @@ const feedback = async (type) => {
     if (type === 'A') {
       allWords[idx].review_count = Math.min((allWords[idx].review_count || 0) + 1, 5)
     } else if (type === 'B') {
-      allWords[idx].review_count = Math.max((allWords[idx].review_count || 0) - 1, 0)
+      allWords[idx].review_count = Math.max((allWords[idx].review_count || 0) - 2, 0)
     } else if (type === 'C') {
       allWords[idx].review_count = 5
     }
@@ -407,6 +411,157 @@ const calcStats = async () => {
   stats.value.new = words.filter(w => !w.review_count || w.review_count === 0).length
   stats.value.blocked = words.filter(w => history.find(h => h.word === w.word && h.feedback === 'C')).length
 }
+
+// 1. 新增拼写相关状态
+const spellingInput = ref('')
+const spellingCorrectCount = ref(0)
+const spellingError = ref('')
+const spellingMode = ref(false)
+const spellingShowAnswer = ref(false)
+const spellingCorrectWord = ref('')
+
+// 2. 单词数据结构增加 isMastered 字段（兼容旧数据）
+function ensureWordMasteredFlag(word) {
+  if (word && typeof word.isMastered === 'undefined') word.isMastered = false
+  return word
+}
+watch(currentWord, (val) => {
+  if (val) ensureWordMasteredFlag(val)
+  spellingInput.value = ''
+  spellingCorrectCount.value = 0
+  spellingError.value = ''
+  spellingMode.value = false
+  // 只要需要拼写（复习次数>=5且未记住），直接进入拼写模式
+  if (val && val.review_count >= 5 && !val.isMastered) {
+    spellingMode.value = true
+  }
+})
+
+// 3. 进入拼写模式
+function startSpelling() {
+  spellingMode.value = true
+  spellingInput.value = ''
+  spellingError.value = ''
+}
+
+// 4. 拼写提交逻辑
+async function submitSpelling() {
+  if (!currentWord.value) return
+  const input = spellingInput.value.trim().toLowerCase()
+  const answer = currentWord.value.word.trim().toLowerCase()
+  if (input === answer) {
+    // 拼写正确，review_count+1，最大7，7为已掌握
+    spellingError.value = ''
+    const res = await vocabBooksApi.getById(currentBookId.value)
+    const allWords = res.data.words || []
+    const idx = allWords.findIndex(w => w.word === currentWord.value.word)
+    if (idx !== -1) {
+      allWords[idx].review_count = Math.min((allWords[idx].review_count || 0) + 1, 7)
+      // 只有review_count>=7时才设置isMastered=true
+      if (allWords[idx].review_count >= 7) {
+        allWords[idx].isMastered = true
+        // 永不推送该单词
+        await vocabBooksApi.postFeedback(currentBookId.value, currentWord.value.word, 'C')
+      } else {
+        allWords[idx].isMastered = false
+      }
+      await vocabBooksApi.update(currentBookId.value, {
+        title: currentBookTitle.value,
+        words: allWords
+      })
+    }
+    spellingMode.value = false
+    await loadWords()
+  } else {
+    // 不弹ElMessage，直接在拼写区下方显示正确单词3秒
+    spellingShowAnswer.value = true
+    spellingCorrectWord.value = currentWord.value.word
+    // 拼写错误复习值减少2
+    const res = await vocabBooksApi.getById(currentBookId.value)
+    const allWords = res.data.words || []
+    const idx = allWords.findIndex(w => w.word === currentWord.value.word)
+    if (idx !== -1) {
+      allWords[idx].review_count = Math.max((allWords[idx].review_count || 0) - 2, 0)
+      await vocabBooksApi.update(currentBookId.value, {
+        title: currentBookTitle.value,
+        words: allWords
+      })
+    }
+    setTimeout(async () => {
+      spellingShowAnswer.value = false
+      spellingMode.value = false
+      await feedback('B')
+    }, 3000)
+  }
+}
+
+// 5. 更新单词isMastered到后端
+async function updateWordMastered(word, isMastered) {
+  // 获取完整单词列表
+  const res = await vocabBooksApi.getById(currentBookId.value)
+  const allWords = res.data.words || []
+  const idx = allWords.findIndex(w => w.word && w.word.trim() === word.trim())
+  if (idx !== -1) {
+    allWords[idx].isMastered = isMastered
+    await vocabBooksApi.update(currentBookId.value, {
+      title: currentBookTitle.value,
+      words: allWords
+    })
+  }
+}
+
+// 计算是否只剩最后一个未记住单词
+const isLastWord = computed(() => {
+  if (!currentBookId.value) return false
+  // 只看未记住的单词数量
+  const allWords = (vocabBooks.value.find(b => b.id === currentBookId.value)?.words || []).filter(w => !w.isMastered)
+  return allWords.length === 1
+})
+
+// 拼写提示：首尾字母露出
+function spellingMask(word) {
+  if (!word || word.length < 3) return word
+  return word[0] + '_'.repeat(word.length - 2) + word[word.length - 1]
+}
+function maxSpellingLength(word) {
+  if (!word || word.length < 3) return word.length
+  return word.length - 2
+}
+
+// 播放单词音频
+const playWordAudio = async (word) => {
+  if (!word) return
+  const url = "https://api.siliconflow.cn/v1/audio/speech"
+  const payload = {
+    model: "FunAudioLLM/CosyVoice2-0.5B",
+    input: word,
+    voice: "FunAudioLLM/CosyVoice2-0.5B:alex",
+    response_format: "mp3",
+    sample_rate: 32000,
+    stream: false,
+    speed: 1,
+    gain: 0
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey.value}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) throw new Error('语音接口请求失败')
+    // 返回的是mp3的base64或二进制
+    const blob = await res.blob()
+    const audioUrl = URL.createObjectURL(blob)
+    const audio = new Audio(audioUrl)
+    audio.play()
+  } catch (e) {
+    ElMessage.error(e?.message || '播放失败')
+  }
+}
+
 </script>
 
 <script>
@@ -540,59 +695,98 @@ import VocabBookManager from './components/VocabBookManager.vue'
         <el-main>
           <div class="learning-system-center">
             <div v-if="currentWord" class="learning-card">
-              <template v-if="!showSentenceInput">
-                <div class="word-main">
-                  <h2 class="word">{{ currentWord.word }}</h2>
-                  <div v-if="showMeaning">
-                    <p class="meaning">{{ currentWord.meaning }}</p>
-                    <p class="example" v-if="currentWord.example">你的例句：{{ currentWord.example }}</p>
-                  </div>
-                </div>
-                <div class="actions">
-                  <el-button v-if="!showMeaning" type="primary" @click="showMeaning = true">显示释义</el-button>
-                  <template v-else>
-                    <el-button @click="feedback('A')" type="success">认识</el-button>
-                    <el-button v-if="!showSentenceInput" @click="onShowSentenceInput" type="warning">不认识</el-button>
-                    <el-button @click="feedback('C')" type="danger" class="never-btn">永不推送</el-button>
-                  </template>
-                </div>
-                <div class="review-count">复习次数：{{ currentWord.review_count }}/5</div>
-              </template>
+              <div v-if="aiLoading" class="ai-loading-spinner">
+                <div class="spinner"></div>
+                <div style="margin-top:12px;color:#888;font-size:1.05rem;">AI智能推荐中…</div>
+              </div>
               <template v-else>
-                <div v-if="!showSentenceReview" class="sentence-input-panel">
-                  <h2 class="word">{{ currentWord.word }}</h2>
-                  <el-input v-model="userSentence" type="textarea" :rows="3" placeholder="请用该单词造句（英文）" />
-                  <div v-if="sentenceError" style="color:red;margin-top:8px;">{{ sentenceError }}</div>
-                  <div style="margin-top:12px;display:flex;gap:12px;justify-content:center;">
-                    <el-button type="primary" :loading="sentenceLoading" @click="onSubmitSentence">提交</el-button>
-                    <el-button @click="showSentenceInput=false">取消</el-button>
+                <template v-if="!showSentenceInput">
+                  <div class="word-main">
+                    <template v-if="spellingMode">
+                      <p class="meaning" style="font-size:1.3rem;font-weight:600;">{{ currentWord.meaning }}</p>
+                    </template>
+                    <template v-else>
+                      <h2 class="word">
+                        {{ currentWord.word }}
+                        <el-tag v-if="currentWord.isMastered" type="success" style="margin-left:8px;">已记住</el-tag>
+                        <el-button circle size="small" style="margin-left:10px;vertical-align:middle;" @click="playWordAudio(currentWord.word)">
+                          <el-icon><SpeakerWaveIcon /></el-icon>
+                        </el-button>
+                      </h2>
+                      <div v-if="showMeaning">
+                        <p class="meaning">{{ currentWord.meaning }}</p>
+                        <p class="example" v-if="currentWord.example">
+                          <el-button circle size="small" style="margin-right:8px;vertical-align:middle;" @click="playWordAudio(currentWord.example)">
+                            <el-icon><SpeakerWaveIcon /></el-icon>
+                          </el-button>
+                          你的例句：{{ currentWord.example }}
+                        </p>
+                      </div>
+                    </template>
                   </div>
-                </div>
-                <div v-else class="sentence-review-panel">
-                  <div :class="['sentence-review-level',
-                    aiSentenceLevel==='1' ? 'level-green' : aiSentenceLevel==='2' ? 'level-orange' : aiSentenceLevel==='3' ? 'level-red' : '']">
-                    <span v-if="aiSentenceLevel==='1'">你的句子特别完美</span>
-                    <span v-else-if="aiSentenceLevel==='2'">你的句子很好不过有些语法错误</span>
-                    <span v-else-if="aiSentenceLevel==='3'">你的句子很不通顺</span>
-                    <span v-else>未知</span>
+                  <div class="actions" v-if="!spellingMode">
+                    <el-button v-if="!showMeaning" type="primary" @click="showMeaning = true">显示释义</el-button>
+                    <template v-else>
+                      <el-button v-if="!isLastWord && currentWord.review_count < 5" @click="feedback('A')" type="success">认识</el-button>
+                      <el-button v-if="!isLastWord && currentWord.review_count < 5" @click="onShowSentenceInput" type="warning">不认识</el-button>
+                      <el-button v-if="!isLastWord" @click="feedback('C')" type="danger" class="never-btn">永不推送</el-button>
+                    </template>
                   </div>
-                  <div class="sentence-review-box">
-                    <div class="sentence-row">
-                      <span :class="['sentence-content',
-                        aiSentenceLevel==='1' ? 'content-green' : aiSentenceLevel==='2' ? 'content-orange' : aiSentenceLevel==='3' ? 'content-red' : '']">
-                        {{ userSentence }}
-                      </span>
-                    </div>
-                    <div class="sentence-row">
-                      <span class="sentence-content content-green">{{ aiFixedSentence }}</span>
-                    </div>
+                  <div v-if="spellingMode" class="spelling-area" style="margin: 24px 0 0 0;">
+                    <div style="font-size:1.1rem;margin-bottom:8px;">请输入单词，首尾字母已给出：</div>
+                    <el-input
+                      v-model="spellingInput"
+                      :maxlength="currentWord.word.length"
+                      @keyup.enter="submitSpelling"
+                      class="spelling-input-custom"
+                      :placeholder="spellingMask(currentWord.word)"
+                      style="width: 220px; margin: 0 auto; font-weight: bold; font-size: 1.3rem; text-align: center;"
+                      autocomplete="off"
+                    />
+                    <div v-if="spellingError" style="color:#dc2626;margin-top:8px;font-size:1rem;">{{ spellingError }}</div>
+                    <div v-else style="height:24px;"></div>
+                    <div v-if="spellingShowAnswer" style="color:#2563eb;margin-top:8px;font-size:1.15rem;font-weight:600;">正确拼写：{{ spellingCorrectWord }}</div>
                   </div>
-                  <div class="sentence-review-comment">{{ aiSentenceComment }}</div>
-                  <div style="margin-top:18px;display:flex;gap:12px;justify-content:center;">
-                    <el-button type="primary" @click="onConfirmSentence">确认保存</el-button>
-                    <el-button @click="onCancelSentence">取消</el-button>
+                  <div class="review-count">复习次数：{{ currentWord.review_count }}/5</div>
+                </template>
+                <template v-else>
+                  <div class="sentence-input-panel" style="margin-top: 18px;">
+                    <template v-if="!showSentenceReview">
+                      <el-form>
+                        <el-form-item label="用该单词造句">
+                          <el-input
+                            v-model="userSentence"
+                            type="textarea"
+                            :rows="4"
+                            placeholder="请用当前单词造一个英文句子"
+                            class="sentence-input-custom"
+                          />
+                        </el-form-item>
+                        <div v-if="sentenceError" style="color:#dc2626;margin-bottom:8px;">{{ sentenceError }}</div>
+                        <el-button :loading="sentenceLoading" type="primary" @click="onSubmitSentence">提交</el-button>
+                        <el-button @click="showSentenceInput = false" style="margin-left: 8px;">取消</el-button>
+                      </el-form>
+                    </template>
+                    <template v-else>
+                      <h2 class="word">{{ currentWord.word }}</h2>
+                      <div v-if="currentWord.meaning" class="meaning">{{ currentWord.meaning }}</div>
+                      <div class="sentence-review-box" style="margin-top: 16px;">
+                        <div class="sentence-row">
+                          <span class="sentence-content">{{ userSentence }}</span>
+                        </div>
+                        <div class="sentence-row">
+                          <span class="sentence-content content-green">{{ aiFixedSentence }}</span>
+                          <el-button circle size="small" style="margin-left:8px;vertical-align:middle;" @click="playWordAudio(aiFixedSentence)">
+                            <el-icon><SpeakerWaveIcon /></el-icon>
+                          </el-button>
+                        </div>
+                        <div class="sentence-review-comment">{{ aiSentenceComment }}</div>
+                        <el-button type="primary" @click="onConfirmSentence">保存例句并继续</el-button>
+                        <el-button @click="onCancelSentence" style="margin-left: 8px;">返回修改</el-button>
+                      </div>
+                    </template>
                   </div>
-                </div>
+                </template>
               </template>
             </div>
             <div v-else class="learning-card-empty">
@@ -927,39 +1121,6 @@ body {
   min-width: unset;
   max-width: 100vw;
 }
-.sentence-review-level {
-  min-width: 90px;
-  height: 90px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.35rem;
-  font-weight: 600;
-  margin-bottom: 18px;
-  border-radius: 18px;
-  background: #f3f4f6;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 0 18px;
-  width: auto;
-}
-.level-green {
-  background: linear-gradient(90deg, #d1fae580 0%, #fff 100%);
-  color: #16a34a;
-  backdrop-filter: blur(30px);
-}
-.level-orange {
-  background: linear-gradient(90deg, #fef3c780 0%, #fff 100%);
-  color: #d97706;
-  backdrop-filter: blur(30px);
-}
-.level-red {
-  background: linear-gradient(90deg, #fee2e280 0%, #fff 100%);
-  color: #dc2626;
-  backdrop-filter: blur(30px);
-}
 .sentence-review-box {
   background: #f3f4f6;
   border-radius: 16px;
@@ -972,27 +1133,30 @@ body {
 }
 .sentence-row {
   margin-bottom: 8px;
-  font-size: 1.05rem;
+  font-size: 1.15rem;
   display: flex;
   align-items: flex-start;
   justify-content: center;
 }
-.sentence-label {
-  color: #888;
-  margin-right: 6px;
-}
 .sentence-content {
-  color: #222;
   word-break: break-all;
+  border-radius: 8px;
+  padding: 2px 8px;
+}
+.content-blue {
+  color: #2563eb;
 }
 .content-green {
   color: #16a34a;
 }
-.content-orange {
-  color: #d97706;
+.dark .sentence-review-box {
+  background: #23272e;
 }
-.content-red {
-  color: #dc2626;
+.dark .sentence-content.content-blue {
+  color: #60a5fa;
+}
+.dark .sentence-content.content-green {
+  color: #4ade80;
 }
 .sentence-review-comment {
   font-size: 1.05rem;
@@ -1003,14 +1167,8 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dark .sentence-review-box {
-  background: #23272e;
-}
-.dark .sentence-label {
-  color: #aaa;
-}
-.dark .sentence-content {
-  color: #eee;
+.dark .sentence-review-comment {
+  color: #f87171;
 }
 
 /* 主题切换按钮美化 */
@@ -1092,4 +1250,142 @@ body {
   border-radius: 14px !important;
   background: var(--el-bg-color) !important;
 }
+
+.ai-loading-spinner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+}
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 5px solid #e5e7eb;
+  border-top: 5px solid #2563eb;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.dark .spinner {
+  border: 5px solid #23272e;
+  border-top: 5px solid #60a5fa;
+}
+
+.sentence-input-custom .el-textarea__inner {
+  min-height: 120px !important;
+  font-size: 1.15rem;
+  border-radius: 14px !important;
+  border: 1.5px solid #e5e7eb !important;
+  background: #f8fafc !important;
+  color: #222 !important;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.03);
+  padding: 16px 18px !important;
+  resize: vertical;
+  transition: border 0.2s, box-shadow 0.2s;
+}
+.sentence-input-custom .el-textarea__inner:focus {
+  border: 1.5px solid #2563eb !important;
+  box-shadow: 0 0 0 2px #2563eb22;
+  background: #fff !important;
+}
+.dark .sentence-input-custom .el-textarea__inner {
+  background: #23272e !important;
+  color: #eee !important;
+  border: 1.5px solid #333 !important;
+}
+.dark .sentence-input-custom .el-textarea__inner:focus {
+  border: 1.5px solid #60a5fa !important;
+  box-shadow: 0 0 0 2px #60a5fa33;
+  background: #23272e !important;
+}
+
+.spelling-input-custom .el-input__inner {
+  text-align: center;
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 2px solid transparent !important;
+  background: rgba(255,255,255,0.15) !important;
+  box-shadow: none !important;
+}
+.spelling-input-custom .el-input__inner::placeholder {
+  color: #bbb;
+  font-size: 1.1rem;
+  letter-spacing: 0.3em;
+}
+.dark .spelling-input-custom .el-input__inner {
+  background: #23272e;
+  color: #eee;
+  border: 1.5px solid #333;
+}
 </style>
+
+/* 拼写输入区验证码风格无外框终极方案 */
+:deep(.spelling-input-custom .el-input__inner) {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background: transparent !important;
+  caret-color: transparent !important;
+  text-align: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.5em;
+  color: #222;
+  transition: none;
+}
+:deep(.spelling-input-custom .el-input__inner:focus),
+:deep(.spelling-input-custom .el-input__inner:hover),
+:deep(.spelling-input-custom .el-input__inner:active) {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background: transparent !important;
+  caret-color: transparent !important;
+}
+:deep(.spelling-input-custom .el-input__inner::placeholder) {
+  color: #bbb;
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: 0.5em;
+  text-align: center;
+}
+:deep(.dark .spelling-input-custom .el-input__inner) {
+  color: #eee;
+}
+
+.dark .el-dropdown-menu li:hover {
+  color: rgba(25,25,25,1) !important;
+}
+
+:deep(.el-dropdown-menu__item) {
+  background: rgba(120,120,120,0.18) !important;
+}
+:deep(.el-dropdown-menu__item:not(.is-disabled):focus),
+:deep(.el-dropdown-menu__item:not(.is-disabled):hover) {
+  background: rgba(120,120,120,0.18) !important;
+  color: var(--el-dropdown-menuItem-hover-color) !important;
+}
+
+@layer utilities {
+  .el-dropdown-menu__item {
+    @apply bg-gray-200 bg-opacity-80 !important;
+  }
+  .el-dropdown-menu__item:not(.is-disabled):hover,
+  .el-dropdown-menu__item:not(.is-disabled):focus {
+    @apply bg-gray-300 bg-opacity-80 !important;
+    color: var(--el-dropdown-menuItem-hover-color) !important;
+  }
+  .dark .el-dropdown-menu__item,
+  .dark .el-dropdown-menu__item:not(.is-disabled):hover,
+  .dark .el-dropdown-menu__item:not(.is-disabled):focus {
+    @apply bg-gray-700 bg-opacity-80 !important;
+    color: var(--el-dropdown-menuItem-hover-color) !important;
+  }
+}

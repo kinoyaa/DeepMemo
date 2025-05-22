@@ -37,6 +37,11 @@ router.post('/:id/feedback', async (req, res) => {
     const { id } = req.params;
     const { word, feedback } = req.body;
     if (!word || !feedback) return res.status(400).json({ error: 'word和feedback不能为空' });
+
+    // 检查词书是否存在
+    const [books] = await pool.query('SELECT id FROM vocab_books WHERE id = ?', [id]);
+    if (!books.length) return res.status(404).json({ error: '词书不存在' });
+
     await pool.query('INSERT INTO feedback_history (book_id, word, feedback) VALUES (?, ?, ?)', [id, word, feedback]);
     res.json({ success: true });
   } catch (error) {
@@ -139,6 +144,11 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    // 先删 feedback_history
+    await pool.query('DELETE FROM feedback_history WHERE book_id = ?', [id]);
+    // 再删 words
+    await pool.query('DELETE FROM words WHERE book_id = ?', [id]);
+    // 最后删词书
     await pool.query('DELETE FROM vocab_books WHERE id = ?', [id]);
     res.json({ id });
   } catch (error) {

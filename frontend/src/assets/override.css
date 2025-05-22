@@ -1,0 +1,13 @@
+.el-dropdown-menu__item {
+  background: rgba(120,120,120,0.18) !important;
+}
+.el-dropdown-menu__item:not(.is-disabled):hover,
+.el-dropdown-menu__item:not(.is-disabled):focus {
+  background: rgba(120,120,120,0.28) !important;
+  color: var(--el-dropdown-menuItem-hover-color) !important;
+}
+.dark .el-dropdown-menu__item,
+.dark .el-dropdown-menu__item:not(.is-disabled):hover,
+.dark .el-dropdown-menu__item:not(.is-disabled):focus {
+  background: rgba(120,120,120,0.28) !important;
+}

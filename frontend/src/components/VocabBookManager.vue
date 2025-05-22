@@ -87,6 +87,12 @@
                 <el-input-number v-model="scope.row.review_count" :min="0" :max="5" size="small" />
               </template>
             </el-table-column>
+            <el-table-column label="记忆状态">
+              <template #default="scope">
+                <el-tag v-if="scope.row.isMastered" type="success">已记住</el-tag>
+                <el-tag v-else type="info">未记住</el-tag>
+              </template>
+            </el-table-column>
             <el-table-column label="操作">
               <template #default="scope">
                 <el-button size="small" @click="removeWord(scope.$index)">删除</el-button>
@@ -139,6 +145,7 @@
 import { ref, onMounted } from 'vue'
 import { vocabBooksApi } from '../api/vocabBooks'
 import { ElMessage } from 'element-plus'
+import axios from 'axios'
 
 const vocabBooks = ref([])
 const loading = ref(false)
@@ -226,6 +233,18 @@ const deleteBook = async (book) => {
   }
 }
 
+const getAISettings = async () => {
+  try {
+    const res = await axios.get('/api/vocabBooks/settings')
+    return {
+      apiBaseUrl: res.data.apiBaseUrl,
+      apiKey: res.data.apiKey
+    }
+  } catch (e) {
+    throw new Error('无法获取AI设置')
+  }
+}
+
 const aiParseAndImport = async () => {
   aiLoading.value = true
   try {
@@ -239,18 +258,20 @@ const aiParseAndImport = async () => {
       aiLoading.value = false
       return
     }
+    // 每次都从后端获取apikey和baseurl
+    const { apiBaseUrl: realApiBaseUrl, apiKey: realApiKey } = await getAISettings()
     // 调用AI接口解析单词
-    const response = await fetch(apiBaseUrl.value, {
+    const response = await fetch(realApiBaseUrl, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey.value}`,
+        'Authorization': `Bearer ${realApiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         model: 'THUDM/GLM-4-9B-0414',
         messages: [{
           role: 'user',
-          content: `请将以下内容解析为单词列表，每行格式为"单词 释义"，释义里的单词要有词性标识，返回JSON数组格式：[{word:"", meaning:""}]，内容如下：\n${aiImportForm.value.wordsText}`
+          content: `请将以下内容解析为单词列表，每行格式为"单词 释义"，释义里的单词要有词性标识比如（n. adv.），返回JSON数组格式：[{word:"", meaning:""}]，内容如下：\n${aiImportForm.value.wordsText}`
         }],
         temperature: 0.7,
         max_tokens: 2000
@@ -317,11 +338,13 @@ const aiGenerateBook = async () => {
       aiLoading.value = false
       return
     }
+    // 每次都从后端获取apikey和baseurl
+    const { apiBaseUrl: realApiBaseUrl, apiKey: realApiKey } = await getAISettings()
     // 调用AI接口生成词书
-    const response = await fetch(apiBaseUrl.value, {
+    const response = await fetch(realApiBaseUrl, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey.value}`,
+        'Authorization': `Bearer ${realApiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
