@@ -1,6 +1,7 @@
 # DeepMemo - AI智能词书学习系统
 
 ## 项目简介
+⚠️此项目是使用TRAE SOLO的VibeCoding练习，不具备参考意义⚠️
 DeepMemo 是一款基于AI驱动的现代化前后端分离词书学习系统，专为高效背单词、智能复习和个性化学习体验而设计。支持自定义词书、AI智能推词、学习统计、进度追踪、语音朗读、单词拼写等全套功能。
 
 ## 主要功能
@@ -14,6 +15,7 @@ DeepMemo 是一款基于AI驱动的现代化前后端分离词书学习系统，
 - **单词拼写功能**：支持单词拼写测试，智能判定掌握度，拼写正确自动升级，拼写错误自动反馈。
 
 ## 技术栈
+- 编写：TRAE SOLO
 - 前端：Vue3 + Element Plus + TailwindCSS
 - 后端：Node.js + Express + MySQL
 - AI服务：OpenAI/GLM大模型
